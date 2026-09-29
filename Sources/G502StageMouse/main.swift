@@ -14,16 +14,16 @@ enum Action: String, CaseIterable {
 
     var title: String {
         switch self {
-        case .none: return "Aucune action"
-        case .historyBack: return "Retour arrière"
-        case .historyForward: return "Retour avant"
-        case .missionControl: return "Mission Control (3 doigts vers le haut)"
-        case .appExpose: return "Fenêtres de l’app (3 doigts vers le bas)"
-        case .nextApp: return "App suivante"
-        case .previousApp: return "App précédente"
-        case .leftSpace: return "Espace précédent"
-        case .rightSpace: return "Espace suivant"
-        case .showDesktop: return "Afficher le bureau"
+        case .none: return L10n.string("action.none")
+        case .historyBack: return L10n.string("action.historyBack")
+        case .historyForward: return L10n.string("action.historyForward")
+        case .missionControl: return L10n.string("action.missionControl")
+        case .appExpose: return L10n.string("action.appExpose")
+        case .nextApp: return L10n.string("action.nextApp")
+        case .previousApp: return L10n.string("action.previousApp")
+        case .leftSpace: return L10n.string("action.leftSpace")
+        case .rightSpace: return L10n.string("action.rightSpace")
+        case .showDesktop: return L10n.string("action.showDesktop")
         }
     }
 }
@@ -41,6 +41,41 @@ private enum ButtonEventSource: String {
     case cgEvent = "CGEvent"
 }
 
+private enum WakeRecoveryReason {
+    case wake
+    case session
+
+    var reconnectKey: String {
+        switch self {
+        case .wake: return "diagnostic.wakeReconnect"
+        case .session: return "diagnostic.sessionReconnect"
+        }
+    }
+
+    var channelNotReadyKey: String {
+        switch self {
+        case .wake: return "diagnostic.channelNotReadyAfterWake"
+        case .session: return "diagnostic.channelNotReadyAfterSession"
+        }
+    }
+}
+
+private enum ButtonSpyRetryReason {
+    case deviceReturned
+    case unexpectedStop
+    case startupStop
+    case initializationFailed
+
+    var diagnosticKey: String {
+        switch self {
+        case .deviceReturned: return "diagnostic.retry.deviceReturned"
+        case .unexpectedStop: return "diagnostic.retry.unexpectedStop"
+        case .startupStop: return "diagnostic.retry.startupStop"
+        case .initializationFailed: return "diagnostic.retry.initializationFailed"
+        }
+    }
+}
+
 private struct PhysicalButtonEvent {
     let button: Int
     let pressed: Bool
@@ -51,7 +86,7 @@ private struct PhysicalButtonEvent {
 
 final class LogitechHIDMonitor {
     private let manager = IOHIDManagerCreate(kCFAllocatorDefault, IOOptionBits(kIOHIDOptionsTypeNone))
-    private let supportedProductIDs = Set([0xC53A, 0xC547, 0xC098])
+    private let supportedProductIDs = Set(MouseDevice.allCases.map(\.productID))
     private var matchedDevices: [CFHashCode: String] = [:]
     var onButton: ((Int, Bool, TimeInterval) -> Void)?
     var onDevice: ((String?, Bool) -> Void)?
@@ -80,12 +115,14 @@ final class LogitechHIDMonitor {
             let pid = IOHIDDeviceGetProperty(device, kIOHIDProductIDKey as CFString) as? Int
             guard let pid, monitor.supportedProductIDs.contains(pid) else { return }
             let displayName: String?
-            if pid == 0xC53A {
-                displayName = "POWERPLAY (C53A)"
-            } else if pid == 0xC547 {
-                displayName = "LIGHTSPEED (C547)"
+            if pid == MouseDevice.powerplayReceiver.productID {
+                displayName = L10n.string("device.powerplayReceiver")
+            } else if pid == MouseDevice.lightspeedReceiver.productID {
+                displayName = L10n.string("device.lightspeedReceiver")
+            } else if pid == MouseDevice.g502xWired.productID {
+                displayName = L10n.string("device.g502X")
             } else {
-                displayName = product == "USB Receiver" ? "Récepteur Logitech" : product
+                displayName = product == "USB Receiver" ? L10n.string("device.logitechReceiver") : product
             }
             let key = CFHash(device)
             monitor.matchedDevices[key] = displayName
@@ -183,15 +220,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var systemSleeping = false
     private var isTerminating = false
     private var accessibilityWarningShown = false
-    private var physicalIndexToG: [Int: Int] = [
-        2: 3,  // clic molette
-        3: 4,  // arrière
-        5: 5,  // avant
-        4: 6,  // DPI shift
-        10: 7, // DPI -
-        9: 8,  // DPI +
-        8: 9   // profil
-    ]
+    private var selectedDevice: MouseDevice?
+    private var physicalIndexToG = MouseDevice.defaultPhysicalIndexToG
     private var calibrationTarget: Int?
     private var calibrationAlert: NSAlert?
     private var updateTimer: Timer?
@@ -279,16 +309,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func loadPhysicalIndexMappings() {
-        for button in buttons {
-            let key = "g502x.physicalIndex.g\(button)"
-            guard UserDefaults.standard.object(forKey: key) != nil else { continue }
-            let index = UserDefaults.standard.integer(forKey: key)
-            let stale = physicalIndexToG.compactMap { entry in
-                entry.key == index || entry.value == button ? entry.key : nil
-            }
-            stale.forEach { physicalIndexToG.removeValue(forKey: $0) }
-            physicalIndexToG[index] = button
-        }
+        physicalIndexToG = (selectedDevice ?? .lightspeedReceiver).physicalIndexMap(buttons: buttons)
+    }
+
+    private func applySelectedDevice(_ device: MouseDevice) {
+        guard selectedDevice != device else { return }
+        selectedDevice = device
+        loadPhysicalIndexMappings()
+        refreshBatteryUI()
+        rebuildMenu()
     }
 
     // Les versions précédentes pouvaient mettre au premier plan une fenêtre au
@@ -312,28 +341,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func makeMenu() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        statusItem.button?.image = NSImage(systemSymbolName: "computermouse.fill", accessibilityDescription: "G502 Stage Mouse")
+        statusItem.button?.image = NSImage(
+            systemSymbolName: "computermouse.fill",
+            accessibilityDescription: L10n.string("visual.window.title")
+        )
         rebuildMenu()
     }
 
     private func rebuildMenu() {
         let menu = NSMenu()
         let state = systemSleeping
-            ? "En pause — réveil automatique"
+            ? L10n.string("status.sleeping")
             : buttonSpyReady && !AXIsProcessTrusted()
-            ? "Boutons détectés — autoriser Accessibilité"
+            ? L10n.string("status.buttonsNeedAccessibility")
             : buttonSpyReady
-            ? "POWERPLAY : boutons bruts actifs"
+            ? L10n.string("status.powerplayButtonsActive")
             : reconnectStatus != nil
             ? reconnectStatus!
             : connectedDevice.connected
-            ? "Récepteur détecté — initialisation HID++"
-            : (!AXIsProcessTrusted() ? "Inactif — autorisation requise" : "Récepteur non détecté")
-        let stateItem = NSMenuItem(title: "G502 Stage Mouse : \(state)", action: nil, keyEquivalent: "")
+            ? L10n.string("status.initializingHID")
+            : (!AXIsProcessTrusted()
+                ? L10n.string("status.permissionRequired")
+                : L10n.string("status.receiverMissing"))
+        let stateItem = NSMenuItem(title: L10n.format("menu.status", state), action: nil, keyEquivalent: "")
         stateItem.isEnabled = false
         menu.addItem(stateItem)
 
-        let versionItem = NSMenuItem(title: "Version 14.7 · V1 événementielle", action: nil, keyEquivalent: "")
+        let versionItem = NSMenuItem(title: L10n.format("menu.version", "14.7"), action: nil, keyEquivalent: "")
         versionItem.isEnabled = false
         menu.addItem(versionItem)
 
@@ -343,18 +377,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(.separator())
 
         let detection = NSMenuItem(
-            title: detectionMode ? "Arrêter l’identification des boutons" : "Identifier mes boutons…",
+            title: L10n.string(detectionMode ? "menu.identify.stop" : "menu.identify.start"),
             action: #selector(toggleDetection),
             keyEquivalent: ""
         )
         detection.target = self
         menu.addItem(detection)
-        let visual = NSMenuItem(title: "Configurer visuellement…", action: #selector(openVisualConfig), keyEquivalent: ",")
+        let visual = NSMenuItem(title: L10n.string("menu.visualConfig"), action: #selector(openVisualConfig), keyEquivalent: ",")
         visual.target = self
         menu.addItem(visual)
 
         let hoverRecovery = NSMenuItem(
-            title: "Stabiliser le survol après les clics",
+            title: L10n.string("menu.hoverRecovery"),
             action: #selector(toggleHoverRecovery),
             keyEquivalent: ""
         )
@@ -363,7 +397,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(hoverRecovery)
 
         let testHoverRecovery = NSMenuItem(
-            title: "Réveiller le survol maintenant",
+            title: L10n.string("menu.testHoverRecovery"),
             action: #selector(testHoverRecoveryNow),
             keyEquivalent: ""
         )
@@ -372,7 +406,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(testHoverRecovery)
 
         let freeScroll = NSMenuItem(
-            title: "Défilement libre en maintenant la molette",
+            title: L10n.string("menu.freeScroll"),
             action: #selector(toggleFreeScroll),
             keyEquivalent: ""
         )
@@ -382,7 +416,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(freeScroll)
 
         for button in buttons {
-            let label = detectedButtons.contains(button) ? "G\(button) ✓ détecté" : "Bouton G\(button)"
+            let label = L10n.format(
+                detectedButtons.contains(button) ? "button.menu.detected" : "button.menu.generic",
+                button
+            )
             let item = NSMenuItem(title: label, action: nil, keyEquivalent: "")
             let submenu = NSMenu()
             for action in Action.allCases {
@@ -397,50 +434,96 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         menu.addItem(.separator())
-        let login = NSMenuItem(title: "Ouvrir automatiquement à la connexion", action: #selector(toggleLogin), keyEquivalent: "")
+        let login = NSMenuItem(title: L10n.string("menu.launchAtLogin"), action: #selector(toggleLogin), keyEquivalent: "")
         login.target = self
         if #available(macOS 13.0, *) {
             login.state = SMAppService.mainApp.status == .enabled ? .on : .off
         }
         menu.addItem(login)
 
-        let permissions = NSMenuItem(title: "Ouvrir les réglages d’accessibilité", action: #selector(openAccessibility), keyEquivalent: "")
+        let permissions = NSMenuItem(title: L10n.string("menu.openAccessibilitySettings"), action: #selector(openAccessibility), keyEquivalent: "")
         permissions.target = self
         permissions.state = AXIsProcessTrusted() ? .on : .off
         menu.addItem(permissions)
 
-        let testAction = NSMenuItem(title: "Tester Mission Control maintenant", action: #selector(testMissionControl), keyEquivalent: "")
+        let testAction = NSMenuItem(title: L10n.string("menu.testMissionControl"), action: #selector(testMissionControl), keyEquivalent: "")
         testAction.target = self
         menu.addItem(testAction)
 
-        let inputPermission = NSMenuItem(title: "Ouvrir les réglages Surveillance de l’entrée", action: #selector(openInputMonitoring), keyEquivalent: "")
+        let inputPermission = NSMenuItem(title: L10n.string("menu.openInputMonitoringSettings"), action: #selector(openInputMonitoring), keyEquivalent: "")
         inputPermission.target = self
         menu.addItem(inputPermission)
 
-        let diagnostic = NSMenuItem(title: "Diagnostic POWERPLAY / HID++…", action: #selector(showHIDDiagnostic), keyEquivalent: "")
+        let diagnostic = NSMenuItem(title: L10n.string("menu.hidDiagnostic"), action: #selector(showHIDDiagnostic), keyEquivalent: "")
         diagnostic.target = self
         menu.addItem(diagnostic)
 
         let restore = NSMenuItem(
-            title: "Restaurer le profil original (retirer F13–F19)…",
+            title: L10n.string("menu.restoreOriginalProfile"),
             action: #selector(restoreOriginalProfile),
             keyEquivalent: ""
         )
         restore.target = self
+        restore.isHidden = selectedDevice?.supportsLegacyProfileRestore == false
         menu.addItem(restore)
 
-        let restart = NSMenuItem(title: "Relancer la détection", action: #selector(restartTap), keyEquivalent: "")
+        let restart = NSMenuItem(title: L10n.string("menu.restartDetection"), action: #selector(restartTap), keyEquivalent: "")
         restart.target = self
         menu.addItem(restart)
 
-        let update = NSMenuItem(title: "Rechercher les mises à jour…", action: #selector(checkForUpdatesManually), keyEquivalent: "")
+        let update = NSMenuItem(title: L10n.string("menu.checkForUpdates"), action: #selector(checkForUpdatesManually), keyEquivalent: "")
         update.target = self
         menu.addItem(update)
+        let languageItem = NSMenuItem(
+            title: L10n.string("language.menu.title"),
+            action: nil,
+            keyEquivalent: ""
+        )
+        let languageMenu = NSMenu()
+        for language in AppLanguage.allCases {
+            let item = NSMenuItem(
+                title: L10n.string(language.titleKey),
+                action: #selector(selectLanguage(_:)),
+                keyEquivalent: ""
+            )
+            item.target = self
+            item.representedObject = language.rawValue
+            item.state = language == L10n.selectedLanguage ? .on : .off
+            languageMenu.addItem(item)
+        }
+        languageItem.submenu = languageMenu
+        menu.addItem(languageItem)
         menu.addItem(.separator())
-        let quit = NSMenuItem(title: "Quitter", action: #selector(quitApp), keyEquivalent: "q")
+        let quit = NSMenuItem(title: L10n.string("menu.quit"), action: #selector(quitApp), keyEquivalent: "q")
         quit.target = self
         menu.addItem(quit)
         statusItem.menu = menu
+    }
+
+    @objc private func selectLanguage(_ sender: NSMenuItem) {
+        guard let rawValue = sender.representedObject as? String,
+              let language = AppLanguage(rawValue: rawValue),
+              language != L10n.selectedLanguage else { return }
+        L10n.select(language)
+        relaunchForLanguageChange()
+    }
+
+    private func relaunchForLanguageChange() {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+        process.arguments = ["-n", Bundle.main.bundlePath]
+        LanguageRelaunch.run(
+            process: process,
+            terminate: { NSApp.terminate(nil) },
+            onFailure: {
+                rebuildMenu()
+                let alert = NSAlert()
+                alert.messageText = L10n.string("language.relaunch.title")
+                alert.informativeText = L10n.string("language.relaunch.message")
+                alert.addButton(withTitle: L10n.string("common.close"))
+                alert.runModal()
+            }
+        )
     }
 
     private func requestAccessibility() {
@@ -460,18 +543,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.connectedDevice = (name, connected)
             self.visualConfig?.updateDevice(name: name, connected: connected)
             if connected {
-                self.appendButtonSpyDiagnostic("Périphérique revenu : \(name ?? "G502 X").")
+                self.appendButtonSpyDiagnostic(L10n.format(
+                    "diagnostic.deviceReturned",
+                    name ?? L10n.string("device.g502X")
+                ))
                 self.reconnectAttempt = 0
                 if !self.buttonSpyReady,
                    self.buttonSpyProcess?.isRunning != true,
                    !self.buttonSpyStartInProgress {
-                    self.scheduleButtonSpyRestart(reason: "retour du périphérique", resetBackoff: true)
+                    self.scheduleButtonSpyRestart(reason: .deviceReturned, resetBackoff: true)
                 }
             } else {
                 self.batteryAvailable = false
                 self.batteryPercent = nil
                 self.batteryStatus = nil
-                self.appendButtonSpyDiagnostic("Périphérique POWERPLAY/LIGHTSPEED déconnecté.")
+                self.appendButtonSpyDiagnostic(L10n.string("diagnostic.deviceDisconnected"))
                 self.stopButtonSpyAndRestoreMode(waitUntilExit: false)
             }
             self.refreshBatteryUI()
@@ -538,7 +624,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         detectedButtons.insert(event.button)
-        statusItem.button?.title = " G\(event.button)"
+        statusItem.button?.title = L10n.format("status.buttonPressed", event.button)
         visualConfig?.highlight(button: event.button)
         rebuildMenu()
 
@@ -1019,14 +1105,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard !accessibilityWarningShown else { return false }
         accessibilityWarningShown = true
         let alert = NSAlert()
-        alert.messageText = "Bouton détecté — action bloquée par macOS"
-        alert.informativeText = """
-        POWERPLAY transmet correctement le bouton, mais macOS interdit encore à cette version de déclencher Mission Control et les raccourcis.
-
-        Dans Accessibilité, supprime l’ancienne « G502 Stage Mouse » si nécessaire, ajoute la nouvelle app depuis Applications, puis active son interrupteur.
-        """
-        alert.addButton(withTitle: "Ouvrir Accessibilité")
-        alert.addButton(withTitle: "Plus tard")
+        alert.messageText = L10n.string("accessibility.blocked.title")
+        alert.informativeText = L10n.string("accessibility.blocked.message")
+        alert.addButton(withTitle: L10n.string("accessibility.open"))
+        alert.addButton(withTitle: L10n.string("common.later"))
         if alert.runModal() == .alertFirstButtonReturn {
             openAccessibility()
         }
@@ -1052,7 +1134,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         detectionMode.toggle()
         if detectionMode {
             detectedButtons.removeAll()
-            statusItem.button?.title = " Identification…"
+            statusItem.button?.title = L10n.string("status.identifying")
         } else {
             statusItem.button?.title = ""
         }
@@ -1100,18 +1182,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func startCalibration(for button: Int) {
         guard buttonSpyReady else {
             let unavailable = NSAlert()
-            unavailable.messageText = "Détection directe indisponible"
-            unavailable.informativeText = "Attends que le menu affiche « POWERPLAY : boutons bruts actifs », puis recommence."
-            unavailable.addButton(withTitle: "OK")
+            unavailable.messageText = L10n.string("calibration.unavailable.title")
+            unavailable.informativeText = L10n.string("calibration.unavailable.message")
+            unavailable.addButton(withTitle: L10n.string("common.ok"))
             unavailable.runModal()
             return
         }
         calibrationTarget = button
         let alert = NSAlert()
         calibrationAlert = alert
-        alert.messageText = "Associer le bouton G\(button)"
-        alert.informativeText = "Presse maintenant le bouton physique G\(button) sur la souris. Les clics gauche et droit sont ignorés."
-        alert.addButton(withTitle: "Annuler")
+        alert.messageText = L10n.format("calibration.title", button)
+        alert.informativeText = L10n.format("calibration.instruction", button)
+        alert.addButton(withTitle: L10n.string("common.cancel"))
         _ = alert.runModal()
         if calibrationTarget == button {
             calibrationTarget = nil
@@ -1121,19 +1203,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func completeCalibration(index: Int, button: Int) {
         guard calibrationTarget == button else { return }
-        let stale = physicalIndexToG.compactMap { entry in
-            entry.key == index || entry.value == button ? entry.key : nil
-        }
-        stale.forEach { physicalIndexToG.removeValue(forKey: $0) }
-        physicalIndexToG[index] = button
-        UserDefaults.standard.set(index, forKey: "g502x.physicalIndex.g\(button)")
+        MouseDevice.assign(index: index, button: button, in: &physicalIndexToG)
+        (selectedDevice ?? .lightspeedReceiver).saveCalibration(index: index, button: button)
         calibrationTarget = nil
         visualConfig?.showCalibration(index: index, button: button)
         if let alert = calibrationAlert {
             alert.window.orderOut(nil)
             NSApp.abortModal()
         }
-        statusItem.button?.title = " G\(button) ✓"
+        statusItem.button?.title = L10n.format("status.buttonCalibrated", button)
         rebuildMenu()
     }
 
@@ -1157,13 +1235,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         hoverRecoveryWorkItem = nil
         hoverRecoveryBurstGeneration += 1
         resetFreeScrollTracking()
-        appendButtonSpyDiagnostic("macOS entre en veille : arrêt propre du canal 0x8110.")
+        appendButtonSpyDiagnostic(L10n.string("diagnostic.macOSWillSleep"))
         stopButtonSpyAndRestoreMode(waitUntilExit: false)
         rebuildMenu()
     }
 
     @objc private func systemDidWake(_ notification: Notification) {
-        resumeAfterInactivity(reason: "réveil macOS")
+        resumeAfterInactivity(reason: .wake)
     }
 
     @objc private func sessionDidResignActive(_ notification: Notification) {
@@ -1173,21 +1251,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         hoverRecoveryWorkItem = nil
         hoverRecoveryBurstGeneration += 1
         resetFreeScrollTracking()
-        appendButtonSpyDiagnostic("Session inactive : arrêt propre du canal 0x8110.")
+        appendButtonSpyDiagnostic(L10n.string("diagnostic.sessionInactive"))
         stopButtonSpyAndRestoreMode(waitUntilExit: false)
         rebuildMenu()
     }
 
     @objc private func sessionDidBecomeActive(_ notification: Notification) {
-        resumeAfterInactivity(reason: "retour de session macOS")
+        resumeAfterInactivity(reason: .session)
     }
 
     // Le verrouillage de session peut couper le canal HID++ sans déclencher un
     // vrai didWake. On utilise donc la même reprise pour le réveil et le retour
     // de session, avec plusieurs essais après la remise sous tension du receiver.
-    private func resumeAfterInactivity(reason: String) {
+    private func resumeAfterInactivity(reason: WakeRecoveryReason) {
         systemSleeping = false
-        appendButtonSpyDiagnostic("\(reason) : reconnexion automatique demandée.")
+        appendButtonSpyDiagnostic(L10n.string(reason.reconnectKey))
         // Un tap peut rester alloué mais ne plus livrer d'événements après un
         // verrouillage ou une veille. Le recréer reproduit automatiquement le
         // bouton « Relancer la détection » sans dépendre d'un port devenu zombie.
@@ -1209,15 +1287,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func showHIDDiagnostic() {
         let text = buttonSpyDiagnostic.isEmpty
-            ? "Initialisation du canal brut 0x8110 en cours…"
+            ? L10n.string("diagnostic.channelInitializing")
             : buttonSpyDiagnostic
         let alert = NSAlert()
         alert.messageText = buttonSpyReady
-            ? "POWERPLAY et MouseButtonSpy sont actifs"
-            : "Diagnostic HID++"
+            ? L10n.string("diagnostic.active.title")
+            : L10n.string("diagnostic.title")
         alert.informativeText = text
-        alert.addButton(withTitle: "Fermer")
-        alert.addButton(withTitle: "Copier")
+        alert.addButton(withTitle: L10n.string("common.close"))
+        alert.addButton(withTitle: L10n.string("common.copy"))
         if alert.runModal() == .alertSecondButtonReturn {
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(text, forType: .string)
@@ -1241,7 +1319,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             throw NSError(
                 domain: "G502StageMouse",
                 code: Int(process.terminationStatus),
-                userInfo: [NSLocalizedDescriptionKey: text.isEmpty ? "Échec de la commande HID++." : text]
+                userInfo: [NSLocalizedDescriptionKey: text.isEmpty ? L10n.string("error.hidCommandFailed") : text]
             )
         }
         return text
@@ -1255,31 +1333,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         throw NSError(
             domain: "G502StageMouse",
             code: 1,
-            userInfo: [NSLocalizedDescriptionKey: "Le module HID++ intégré est introuvable."]
+            userInfo: [NSLocalizedDescriptionKey: L10n.string("error.hidModuleMissing")]
         )
     }
 
-    private func receiverSelection(in directory: URL) throws -> (path: String, pid: String) {
+    private func receiverSelection(in directory: URL) throws -> (path: String, device: MouseDevice) {
         let listing = try runHelper(["--output", "json", "list"], in: directory)
         guard let data = listing.data(using: .utf8),
               let devices = try JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
             throw NSError(
                 domain: "G502StageMouse",
                 code: 3,
-                userInfo: [NSLocalizedDescriptionKey: "Liste HID Logitech illisible : \(listing)"]
+                userInfo: [NSLocalizedDescriptionKey: L10n.format("error.hidDeviceListUnreadable", listing)]
             )
         }
-        for wantedPID in ["C53A", "C547", "C098"] {
-            if let device = devices.first(where: { ($0["pid"] as? String) == wantedPID }),
-               let path = device["path"] as? String {
-                return (path, wantedPID)
-            }
+        if let selection = MouseDevice.select(from: devices) {
+            return (selection.path, selection.device)
         }
         throw NSError(
             domain: "G502StageMouse",
             code: 4,
-            userInfo: [NSLocalizedDescriptionKey:
-                "Ni POWERPLAY (C53A), ni LIGHTSPEED (C547), ni la G502 X filaire (C098) n’a été trouvé.\n\(listing)"]
+            userInfo: [NSLocalizedDescriptionKey: L10n.format("error.receiverNotFound", listing)]
         )
     }
 
@@ -1309,8 +1383,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             throw NSError(
                 domain: "G502StageMouse",
                 code: 5,
-                userInfo: [NSLocalizedDescriptionKey:
-                    "Aucune sauvegarde « profil-…-avant-stage-mouse-….toml » n’a été trouvée dans \(support.path)."]
+                userInfo: [NSLocalizedDescriptionKey: L10n.format("error.originalBackupMissing", support.path)]
             )
         }
         return latest
@@ -1354,14 +1427,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         wakeRecoveryWorkItem = nil
     }
 
-    private func startWakeRecovery(reason: String) {
+    private func startWakeRecovery(reason: WakeRecoveryReason) {
         cancelWakeRecovery()
         let generation = wakeRecoveryGeneration
         scheduleWakeRecoveryAttempt(reason: reason, attempt: 0, generation: generation)
     }
 
     private func scheduleWakeRecoveryAttempt(
-        reason: String,
+        reason: WakeRecoveryReason,
         attempt: Int,
         generation: Int
     ) {
@@ -1377,9 +1450,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 return
             }
             if self.buttonSpyProcess?.isRunning == true {
-                self.appendButtonSpyDiagnostic(
-                    "Canal HID++ non prêt après \(reason) : redémarrage de sécurité."
-                )
+                self.appendButtonSpyDiagnostic(L10n.string(reason.channelNotReadyKey))
                 self.stopButtonSpyAndRestoreMode(waitUntilExit: false)
             }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
@@ -1404,7 +1475,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
     }
 
-    private func scheduleButtonSpyRestart(reason: String, resetBackoff: Bool = false) {
+    private func scheduleButtonSpyRestart(reason: ButtonSpyRetryReason, resetBackoff: Bool = false) {
         guard shouldRunButtonSpy,
               buttonSpyProcess?.isRunning != true,
               !buttonSpyStartInProgress else {
@@ -1418,10 +1489,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let delayIndex = min(reconnectAttempt, reconnectDelays.count - 1)
         let delay = reconnectDelays[delayIndex]
         reconnectAttempt = min(reconnectAttempt + 1, reconnectDelays.count - 1)
-        reconnectStatus = "Reconnexion automatique dans \(delay.formatted(.number.precision(.fractionLength(delay < 1 ? 1 : 0)))) s"
-        appendButtonSpyDiagnostic(
-            "Nouvelle tentative dans \(delay) s (\(reason), palier \(delayIndex + 1)/\(reconnectDelays.count))."
+        let statusDelay = L10n.formattedNumber(delay, fractionDigits: delay < 1 ? 1 : 0)
+        let diagnosticDelay = L10n.formattedNumber(delay, fractionDigits: 1)
+        reconnectStatus = L10n.format(
+            "status.reconnectIn",
+            statusDelay
         )
+        appendButtonSpyDiagnostic(L10n.format(
+            reason.diagnosticKey,
+            diagnosticDelay,
+            delayIndex + 1,
+            reconnectDelays.count
+        ))
 
         let work = DispatchWorkItem { [weak self] in
             guard let self else { return }
@@ -1451,7 +1530,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     ) {
         let normalized = max(100, min(25_600, 100 + Int(round(Double(value - 100) / 50.0)) * 50))
         var arguments = ["dpi", "set", "\(normalized)"]
-        if persist {
+        if persist, selectedDevice?.supportsPersistentDPI != false {
             arguments.append("--persist")
         }
         performDPIOperation(arguments: arguments, completion: completion)
@@ -1465,14 +1544,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             completion(.failure(NSError(
                 domain: "G502StageMouse.DPI",
                 code: 20,
-                userInfo: [NSLocalizedDescriptionKey: "Une opération DPI est déjà en cours."]
+                userInfo: [NSLocalizedDescriptionKey: L10n.string("dpi.error.busy")]
             )))
             return
         }
         dpiOperationInProgress = true
         buttonSpyPaused = true
         stopButtonSpyAndRestoreMode()
-        statusItem.button?.title = " DPI…"
+        statusItem.button?.title = L10n.string("status.dpiBusy")
 
         DispatchQueue.global(qos: .userInitiated).async {
             do {
@@ -1488,7 +1567,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     throw NSError(
                         domain: "G502StageMouse.DPI",
                         code: 21,
-                        userInfo: [NSLocalizedDescriptionKey: "Réponse DPI illisible : \(output)"]
+                        userInfo: [NSLocalizedDescriptionKey: L10n.format("dpi.error.unreadableResponse", output)]
                     )
                 }
                 DispatchQueue.main.async {
@@ -1516,7 +1595,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         reconnectWorkItem?.cancel()
         reconnectWorkItem = nil
-        reconnectStatus = "Connexion HID++ en cours"
+        reconnectStatus = L10n.string("status.connectingHID")
         buttonSpyStartInProgress = true
         buttonSpyLifecycleToken += 1
         let lifecycleToken = buttonSpyLifecycleToken
@@ -1560,10 +1639,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                             self.buttonSpyStartInProgress = false
                         }
                         if !expected {
-                            self.appendButtonSpyDiagnostic(
-                                "Le canal 0x8110 s’est arrêté (code \(process.terminationStatus))."
-                            )
-                            self.scheduleButtonSpyRestart(reason: "arrêt inattendu du canal")
+                            self.appendButtonSpyDiagnostic(L10n.format(
+                                "diagnostic.channelStopped",
+                                Int(process.terminationStatus)
+                            ))
+                            self.scheduleButtonSpyRestart(reason: .unexpectedStop)
                         }
                         self.rebuildMenu()
                     }
@@ -1580,14 +1660,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     }
                     self.buttonSpyStartInProgress = false
                     guard process.isRunning else {
-                        self.scheduleButtonSpyRestart(reason: "canal arrêté au démarrage")
+                        self.scheduleButtonSpyRestart(reason: .startupStop)
                         return
                     }
                     self.buttonSpyProcess = process
-                    self.connectedDevice = (
-                        receiver.pid == "C53A" ? "POWERPLAY (C53A)" : "LIGHTSPEED (\(receiver.pid))",
-                        true
-                    )
+                    self.applySelectedDevice(receiver.device)
+                    let deviceName: String
+                    switch receiver.device {
+                    case .powerplayReceiver: deviceName = L10n.string("device.powerplayReceiver")
+                    case .g502xWired: deviceName = L10n.string("device.g502X")
+                    default: deviceName = L10n.format("device.lightspeedReceiverWithPID", receiver.device.pid)
+                    }
+                    self.connectedDevice = (deviceName, true)
                     self.visualConfig?.updateDevice(
                         name: self.connectedDevice.name,
                         connected: true
@@ -1598,9 +1682,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 DispatchQueue.main.async {
                     guard self.buttonSpyLifecycleToken == lifecycleToken else { return }
                     self.buttonSpyStartInProgress = false
-                    self.appendButtonSpyDiagnostic("Échec de connexion HID++ : \(error.localizedDescription)")
+                    self.appendButtonSpyDiagnostic(L10n.format(
+                        "diagnostic.connectionFailed",
+                        error.localizedDescription
+                    ))
                     self.buttonSpyReady = false
-                    self.scheduleButtonSpyRestart(reason: "échec d’initialisation")
+                    self.scheduleButtonSpyRestart(reason: .initializationFailed)
                 }
             }
         }
@@ -1668,42 +1755,59 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func batteryDisplayText() -> String {
+        batteryText(detail: false)
+    }
+
+    private func batteryDetailText() -> String {
+        batteryText(detail: true)
+    }
+
+    private func batteryText(detail: Bool) -> String {
         guard connectedDevice.connected else {
-            return "Batterie : souris non connectée"
+            return L10n.string(detail ? "battery.detail.mouseDisconnected" : "battery.mouseDisconnected")
+        }
+        if selectedDevice?.hasBattery == false {
+            return L10n.string(detail ? "battery.detail.wired" : "battery.wired")
         }
         guard batteryAvailable else {
             return buttonSpyReady
-                ? "Batterie : indisponible sur ce périphérique"
-                : "Batterie : lecture HID++ en cours…"
+                ? L10n.string(detail ? "battery.detail.unavailable" : "battery.unavailable")
+                : L10n.string(detail ? "battery.detail.reading" : "battery.reading")
         }
 
         let level: String
         if let batteryPercent {
-            level = "\(batteryEstimated ? "~" : "")\(batteryPercent) %"
+            level = L10n.format(
+                batteryEstimated ? "battery.level.estimated" : "battery.level.exact",
+                batteryPercent
+            )
         } else {
-            level = "niveau inconnu"
+            level = L10n.string("battery.level.unknown")
         }
 
-        let state: String
+        let key: String
         if batteryCharging {
-            state = "en charge via POWERPLAY"
+            key = detail ? "battery.detail.charging" : "battery.charging"
         } else if batteryStatus == "charged" {
-            state = "chargée"
+            key = detail ? "battery.detail.charged" : "battery.charged"
         } else if batteryStatus == "charging error" {
-            state = "erreur de charge"
+            key = detail ? "battery.detail.chargingError" : "battery.chargingError"
         } else {
-            state = connectedDevice.name?.contains("POWERPLAY") == true
-                ? "POWERPLAY connecté · pas en charge"
-                : "pas en charge"
+            key = connectedDevice.name?.contains("POWERPLAY") == true
+                ? (detail ? "battery.detail.powerplayNotCharging" : "battery.powerplayNotCharging")
+                : (detail ? "battery.detail.notCharging" : "battery.notCharging")
         }
-        return "Batterie : \(level) · \(state)"
+        return L10n.format(key, level)
     }
 
     private func refreshBatteryUI() {
+        let wired = selectedDevice?.hasBattery == false && connectedDevice.connected
+        visualConfig?.setDPIPersistenceAvailable(selectedDevice?.supportsPersistentDPI != false)
         visualConfig?.updateBattery(
-            text: batteryDisplayText(),
+            text: batteryDetailText(),
             charging: batteryCharging,
-            available: batteryAvailable
+            available: batteryAvailable || wired,
+            showsSymbol: !wired
         )
     }
 
@@ -1755,7 +1859,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     throw NSError(
                         domain: "G502StageMouse.Update",
                         code: 10,
-                        userInfo: [NSLocalizedDescriptionKey: "Le manifeste de mise à jour contient un nom d’archive invalide."]
+                        userInfo: [NSLocalizedDescriptionKey: L10n.string("update.invalidManifest")]
                     )
                 }
                 let archiveURL = updates.appendingPathComponent(manifest.archive)
@@ -1763,7 +1867,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     throw NSError(
                         domain: "G502StageMouse.Update",
                         code: 11,
-                        userInfo: [NSLocalizedDescriptionKey: "L’archive \(manifest.archive) est absente du canal de mise à jour."]
+                        userInfo: [NSLocalizedDescriptionKey: L10n.format("update.archiveMissing", manifest.archive)]
                     )
                 }
 
@@ -1777,9 +1881,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     self.updateCheckInProgress = false
                     guard manual else { return }
                     let alert = NSAlert()
-                    alert.messageText = "Recherche de mise à jour impossible"
+                    alert.messageText = L10n.string("update.checkFailed.title")
                     alert.informativeText = error.localizedDescription
-                    alert.addButton(withTitle: "Fermer")
+                    alert.addButton(withTitle: L10n.string("common.close"))
                     alert.runModal()
                 }
             }
@@ -1790,18 +1894,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         updateCheckInProgress = false
         guard manual else { return }
         let alert = NSAlert()
-        alert.messageText = "G502 Stage Mouse est à jour"
-        alert.informativeText = "Version installée : \(currentVersion)"
-        alert.addButton(withTitle: "OK")
+        alert.messageText = L10n.string("update.current.title")
+        alert.informativeText = L10n.format("update.current.version", currentVersion)
+        alert.addButton(withTitle: L10n.string("common.ok"))
         alert.runModal()
     }
 
     private func offerUpdate(_ manifest: LocalUpdateManifest, archiveURL: URL) {
         let alert = NSAlert()
-        alert.messageText = "Mise à jour \(manifest.version) disponible"
-        alert.informativeText = manifest.notes ?? "L’app peut se mettre à jour et se relancer automatiquement."
-        alert.addButton(withTitle: "Installer et relancer")
-        alert.addButton(withTitle: "Plus tard")
+        alert.messageText = L10n.format("update.available.title", manifest.version)
+        alert.informativeText = L10n.string("update.available.message")
+        alert.addButton(withTitle: L10n.string("update.installAndRelaunch"))
+        alert.addButton(withTitle: L10n.string("update.later"))
         if alert.runModal() == .alertFirstButtonReturn {
             installLocalUpdate(manifest, archiveURL: archiveURL)
         } else {
@@ -1824,7 +1928,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             throw NSError(
                 domain: "G502StageMouse.Update",
                 code: Int(process.terminationStatus),
-                userInfo: [NSLocalizedDescriptionKey: text.isEmpty ? "Échec de \(executable)." : text]
+                userInfo: [NSLocalizedDescriptionKey:
+                    text.isEmpty ? L10n.format("update.executableFailed", executable) : text]
             )
         }
         return text
@@ -1833,7 +1938,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func installLocalUpdate(_ manifest: LocalUpdateManifest, archiveURL: URL) {
         buttonSpyPaused = true
         stopButtonSpyAndRestoreMode()
-        statusItem.button?.title = " Mise à jour…"
+        statusItem.button?.title = L10n.string("status.updateBusy")
         let currentBundle = Bundle.main.bundleURL.standardizedFileURL
 
         DispatchQueue.global(qos: .userInitiated).async {
@@ -1849,7 +1954,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     throw NSError(
                         domain: "G502StageMouse.Update",
                         code: 12,
-                        userInfo: [NSLocalizedDescriptionKey: "La somme SHA-256 de la mise à jour est invalide."]
+                        userInfo: [NSLocalizedDescriptionKey: L10n.string("update.invalidChecksum")]
                     )
                 }
 
@@ -1858,8 +1963,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     throw NSError(
                         domain: "G502StageMouse.Update",
                         code: 13,
-                        userInfo: [NSLocalizedDescriptionKey:
-                            "Place d’abord G502 Stage Mouse dans Applications. Les mises à jour automatiques fonctionneront ensuite."]
+                        userInfo: [NSLocalizedDescriptionKey: L10n.string("update.moveToApplications")]
                     )
                 }
 
@@ -1872,7 +1976,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     throw NSError(
                         domain: "G502StageMouse.Update",
                         code: 14,
-                        userInfo: [NSLocalizedDescriptionKey: "L’archive ne contient pas la version attendue de G502 Stage Mouse."]
+                        userInfo: [NSLocalizedDescriptionKey: L10n.string("update.unexpectedArchiveVersion")]
                     )
                 }
                 _ = try self.runExecutable(
@@ -1885,8 +1989,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     throw NSError(
                         domain: "G502StageMouse.Update",
                         code: 15,
-                        userInfo: [NSLocalizedDescriptionKey:
-                            "Le dossier \(parent.path) n’est pas modifiable par ton compte."]
+                        userInfo: [NSLocalizedDescriptionKey: L10n.format("update.directoryNotWritable", parent.path)]
                     )
                 }
                 let staged = parent.appendingPathComponent(".G502 Stage Mouse.app.update-\(UUID().uuidString)")
@@ -1916,9 +2019,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 DispatchQueue.main.async {
                     self.statusItem.button?.title = ""
                     let alert = NSAlert()
-                    alert.messageText = "Mise à jour automatique impossible"
+                    alert.messageText = L10n.string("update.installFailed.title")
                     alert.informativeText = error.localizedDescription
-                    alert.addButton(withTitle: "Fermer")
+                    alert.addButton(withTitle: L10n.string("common.close"))
                     alert.runModal()
                     self.resumeButtonSpy()
                 }
@@ -1942,6 +2045,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func restoreOriginalProfile() {
+        guard selectedDevice?.supportsLegacyProfileRestore != false else { return }
         let support: URL
         let originalBackup: URL
         do {
@@ -1949,30 +2053,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             originalBackup = try latestOriginalProfileBackup(in: support)
         } catch {
             let missing = NSAlert()
-            missing.messageText = "Sauvegarde d’origine introuvable"
+            missing.messageText = L10n.string("restore.backupMissing.title")
             missing.informativeText = error.localizedDescription
-            missing.addButton(withTitle: "Fermer")
+            missing.addButton(withTitle: L10n.string("common.close"))
             missing.runModal()
             return
         }
 
         let confirmation = NSAlert()
-        confirmation.messageText = "Restaurer les boutons d’origine de la souris ?"
-        confirmation.informativeText = """
-        Cette opération enlèvera de la G502 les touches F13–F19 écrites par une ancienne version. C’est cette ancienne correspondance qui déclenche les macros G1–G6 de ton clavier.
-
-        Sauvegarde à restaurer :
-        \(originalBackup.lastPathComponent)
-
-        Le profil actuel sera lui aussi sauvegardé avant la restauration.
-        """
-        confirmation.addButton(withTitle: "Restaurer")
-        confirmation.addButton(withTitle: "Annuler")
+        confirmation.messageText = L10n.string("restore.confirm.title")
+        confirmation.informativeText = L10n.format("restore.confirm.message", originalBackup.lastPathComponent)
+        confirmation.addButton(withTitle: L10n.string("restore.confirm.action"))
+        confirmation.addButton(withTitle: L10n.string("common.cancel"))
         guard confirmation.runModal() == .alertFirstButtonReturn else { return }
 
         buttonSpyPaused = true
         stopButtonSpyAndRestoreMode()
-        statusItem.button?.title = " Restauration…"
+        statusItem.button?.title = L10n.string("status.restoreBusy")
         DispatchQueue.global(qos: .userInitiated).async {
             do {
                 let receiver = try self.receiverSelection(in: support)
@@ -1985,7 +2082,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     throw NSError(
                         domain: "G502StageMouse",
                         code: 2,
-                        userInfo: [NSLocalizedDescriptionKey: "Impossible de déterminer le profil actif : \(activeOutput)"]
+                        userInfo: [NSLocalizedDescriptionKey: L10n.format("error.activeProfileUnknown", activeOutput)]
                     )
                 }
 
@@ -1998,14 +2095,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 DispatchQueue.main.async {
                     self.statusItem.button?.title = ""
                     let success = NSAlert()
-                    success.messageText = "Profil original restauré"
-                    success.informativeText = """
-                    F13–F19 ont été retirées de la G502. Les macros G1–G6 du clavier ne seront plus déclenchées par la souris.
-
-                    Profil restauré : \(originalBackup.lastPathComponent)
-                    Copie de sécurité du profil remplacé : \(currentBackup)
-                    """
-                    success.addButton(withTitle: "OK")
+                    success.messageText = L10n.string("restore.success.title")
+                    success.informativeText = L10n.format(
+                        "restore.success.message",
+                        originalBackup.lastPathComponent,
+                        currentBackup
+                    )
+                    success.addButton(withTitle: L10n.string("common.ok"))
                     success.runModal()
                     self.resumeButtonSpy()
                 }
@@ -2013,9 +2109,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 DispatchQueue.main.async {
                     self.statusItem.button?.title = ""
                     let failure = NSAlert()
-                    failure.messageText = "Restauration HID++ impossible"
-                    failure.informativeText = error.localizedDescription + "\n\nDiagnostic 0x8110 :\n" + self.buttonSpyDiagnostic
-                    failure.addButton(withTitle: "Fermer")
+                    failure.messageText = L10n.string("restore.failed.title")
+                    failure.informativeText = L10n.format(
+                        "diagnostic.failureDetails",
+                        error.localizedDescription,
+                        self.buttonSpyDiagnostic
+                    )
+                    failure.addButton(withTitle: L10n.string("common.close"))
                     failure.runModal()
                     self.resumeButtonSpy()
                 }
@@ -2033,7 +2133,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         } catch {
             let alert = NSAlert()
-            alert.messageText = "Ouverture automatique"
+            alert.messageText = L10n.string("restore.loginFailed.title")
             alert.informativeText = error.localizedDescription
             alert.runModal()
         }
