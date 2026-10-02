@@ -3,13 +3,13 @@ set -euo pipefail
 
 SCRIPT_DIR=${0:A:h}
 APP_NAME="G502 Stage Mouse"
-APP_VERSION="14.7"
-BUILD_NUMBER="147"
+APP_VERSION="14.8"
+BUILD_NUMBER="148"
 BUILD_DIR="$SCRIPT_DIR/build"
 STAGING_DIR=$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/g502-stage-mouse-build.XXXXXX")
 APP_DIR="$STAGING_DIR/$APP_NAME.app"
 MODULE_CACHE="$BUILD_DIR/module-cache"
-ARCHIVE_NAME="G502X-v14.7-V1.zip"
+ARCHIVE_NAME="G502X-v14.8-V1.zip"
 ARCHIVE="$BUILD_DIR/$ARCHIVE_NAME"
 MANIFEST="$BUILD_DIR/manifest.json"
 LOCAL_UPDATE_DIR="$HOME/Library/Application Support/G502StageMouse/Updates"
@@ -21,7 +21,67 @@ if [[ ! -x "$HELPER_BIN" ]]; then
   exit 1
 fi
 
+PERSONAL_PATHS=$(/usr/bin/strings "$HELPER_BIN" | /usr/bin/grep -cF "$HOME" || true)
+if [[ "$PERSONAL_PATHS" -gt 0 ]]; then
+  if [[ "${RELEASE_BUILD:-0}" == "1" ]]; then
+    echo "Le module HID++ contient le chemin personnel $HOME. Reconstruisez-le avec RUSTFLAGS=\"--remap-path-prefix=\$HOME=~\" (voir docs/RELEASING.md)."
+    exit 1
+  fi
+  echo "Avertissement : le module HID++ contient des chemins personnels. N'utilisez pas ce build pour une publication."
+fi
+
 mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources" "$MODULE_CACHE"
+
+for LANGUAGE in en fr; do
+  /bin/mkdir -p "$APP_DIR/Contents/Resources/$LANGUAGE.lproj"
+  for TABLE in Localizable InfoPlist; do
+    SOURCE_TABLE="$SCRIPT_DIR/Resources/$LANGUAGE.lproj/$TABLE.strings"
+    /usr/bin/plutil -lint "$SOURCE_TABLE"
+    /bin/cp "$SOURCE_TABLE" "$APP_DIR/Contents/Resources/$LANGUAGE.lproj/$TABLE.strings"
+  done
+done
+
+for TABLE in Localizable InfoPlist; do
+  CLANG_MODULE_CACHE_PATH="$MODULE_CACHE" /usr/bin/xcrun swift "$SCRIPT_DIR/work/verify_localizations.swift" \
+    "$SCRIPT_DIR/Resources/en.lproj/$TABLE.strings" \
+    "$SCRIPT_DIR/Resources/fr.lproj/$TABLE.strings"
+done
+
+CLANG_MODULE_CACHE_PATH="$MODULE_CACHE" /usr/bin/swiftc \
+  -parse-as-library \
+  "$SCRIPT_DIR/work/verify_mouse_device.swift" \
+  "$SCRIPT_DIR/Sources/G502StageMouse/MouseDevice.swift" \
+  -o "$MODULE_CACHE/verify_mouse_device"
+
+CLANG_MODULE_CACHE_PATH="$MODULE_CACHE" /usr/bin/swiftc \
+  -parse-as-library \
+  "$SCRIPT_DIR/work/verify_desktop_swipe_gesture.swift" \
+  "$SCRIPT_DIR/Sources/G502StageMouse/DesktopSwipeGesture.swift" \
+  -o "$MODULE_CACHE/verify_desktop_swipe_gesture"
+
+CLANG_MODULE_CACHE_PATH="$MODULE_CACHE" /usr/bin/swiftc \
+  -parse-as-library \
+  "$SCRIPT_DIR/work/verify_action.swift" \
+  "$SCRIPT_DIR/Sources/G502StageMouse/Action.swift" \
+  "$SCRIPT_DIR/Sources/G502StageMouse/Localization.swift" \
+  "$SCRIPT_DIR/Sources/G502StageMouse/DesktopSwipeGesture.swift" \
+  "$SCRIPT_DIR/Sources/G502StageMouse/DockNotification.swift" \
+  -o "$MODULE_CACHE/verify_action"
+
+CLANG_MODULE_CACHE_PATH="$MODULE_CACHE" /usr/bin/swiftc \
+  -parse-as-library \
+  -sdk "$SDK" \
+  -framework AppKit \
+  -framework SceneKit \
+  "$SCRIPT_DIR/work/verify_visual_dpi_layout.swift" \
+  "$SCRIPT_DIR/Sources/G502StageMouse/VisualConfig.swift" \
+  "$SCRIPT_DIR/Sources/G502StageMouse/Action.swift" \
+  "$SCRIPT_DIR/Sources/G502StageMouse/DesktopSwipeGesture.swift" \
+  -o "$MODULE_CACHE/verify_visual_dpi_layout"
+"$MODULE_CACHE/verify_visual_dpi_layout" "$SCRIPT_DIR/Resources/fr.lproj/Localizable.strings"
+"$MODULE_CACHE/verify_action"
+"$MODULE_CACHE/verify_desktop_swipe_gesture"
+"$MODULE_CACHE/verify_mouse_device"
 
 CLANG_MODULE_CACHE_PATH="$MODULE_CACHE" /usr/bin/swiftc \
   -sdk "$SDK" \
@@ -50,11 +110,15 @@ CLANG_MODULE_CACHE_PATH="$MODULE_CACHE" /usr/bin/swiftc \
 /usr/libexec/PlistBuddy -c "Add :CFBundleExecutable string G502StageMouse" "$APP_DIR/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Add :CFBundlePackageType string APPL" "$APP_DIR/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Add :CFBundleIconFile string AppIcon" "$APP_DIR/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Add :CFBundleDevelopmentRegion string en" "$APP_DIR/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Add :CFBundleLocalizations array" "$APP_DIR/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Add :CFBundleLocalizations:0 string en" "$APP_DIR/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Add :CFBundleLocalizations:1 string fr" "$APP_DIR/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Add :CFBundleShortVersionString string $APP_VERSION" "$APP_DIR/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Add :CFBundleVersion string $BUILD_NUMBER" "$APP_DIR/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Add :LSUIElement bool true" "$APP_DIR/Contents/Info.plist"
-/usr/libexec/PlistBuddy -c "Add :NSHumanReadableCopyright string Utilitaire local G502" "$APP_DIR/Contents/Info.plist"
-/usr/libexec/PlistBuddy -c "Add :NSInputMonitoringUsageDescription string Nécessaire pour lire et configurer les boutons de la G502 X LIGHTSPEED." "$APP_DIR/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Add :NSHumanReadableCopyright string Local G502 utility" "$APP_DIR/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Add :NSInputMonitoringUsageDescription string Required to read and configure buttons on the G502 X." "$APP_DIR/Contents/Info.plist"
 
 /usr/bin/xattr -cr "$APP_DIR"
 /usr/bin/codesign --force --sign - "$APP_DIR/Contents/MacOS/opengcontrol"
@@ -67,7 +131,7 @@ CLANG_MODULE_CACHE_PATH="$MODULE_CACHE" /usr/bin/swiftc \
   /usr/bin/zip -qry -X "$ARCHIVE" "$APP_NAME.app"
 )
 CHECKSUM=$(/usr/bin/shasum -a 256 "$ARCHIVE" | /usr/bin/cut -d ' ' -f 1)
-/usr/bin/printf '{\n  "version": "%s",\n  "archive": "%s",\n  "sha256": "%s",\n  "notes": "V1 événementielle : survol sans timer, protection de la saisie, défilement libre à la molette, reconnexion sobre et reprise après veille."\n}\n' \
+/usr/bin/printf '{\n  "version": "%s",\n  "archive": "%s",\n  "sha256": "%s",\n  "notes": "Event-driven V1: timer-free hover, typing safeguards, free wheel scrolling, measured reconnection, and wake-from-sleep recovery."\n}\n' \
   "$APP_VERSION" "$ARCHIVE_NAME" "$CHECKSUM" > "$MANIFEST"
 
 "$SCRIPT_DIR/work/verify_hover_safety.sh" \

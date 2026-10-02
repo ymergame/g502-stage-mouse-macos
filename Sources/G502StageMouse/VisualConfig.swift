@@ -162,15 +162,29 @@ final class MouseSceneView: SCNView {
 
 final class VisualConfigWindowController: NSWindowController, NSWindowDelegate {
     private let diagram = MouseSceneView(frame: .zero)
-    private let detectedLabel = NSTextField(wrappingLabelWithString: "✓ Attente de détection…")
-    private let deviceLabel = NSTextField(labelWithString: "🟢 Recherche du récepteur…")
+    private let detectedLabel = NSTextField(wrappingLabelWithString: L10n.string("visual.detection.waiting"))
+    private let deviceLabel = NSTextField(labelWithString: L10n.string("device.searchingReceiver"))
     private let dpiSlider = NSSlider(value: 1_600, minValue: 100, maxValue: 25_600, target: nil, action: nil)
     private let dpiField = NSTextField(string: "1600")
     private let dpiPreset = NSPopUpButton(frame: .zero, pullsDown: false)
-    private let dpiPersist = NSButton(checkboxWithTitle: "Enregistrer dans le profil", target: nil, action: nil)
-    private let dpiApply = NSButton(title: "Appliquer", target: nil, action: nil)
-    private let dpiStatus = NSTextField(labelWithString: "Lecture du DPI…")
+    private let dpiPersist = NSButton(checkboxWithTitle: L10n.string("dpi.persist"), target: nil, action: nil)
+    private let dpiApply = NSButton(title: L10n.string("dpi.apply"), target: nil, action: nil)
+    private let dpiStatus = NSTextField(labelWithString: L10n.string("dpi.readingCurrent"))
     private var popups: [Int: NSPopUpButton] = [:]
+    private let swipePopup = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let swipeDistanceSlider = NSSlider(
+        value: DesktopSwipeGesture.defaultActivationDistance,
+        minValue: DesktopSwipeGesture.activationDistanceRange.lowerBound,
+        maxValue: DesktopSwipeGesture.activationDistanceRange.upperBound,
+        target: nil,
+        action: nil
+    )
+    private let swipeDistanceValue = NSTextField(labelWithString: "")
+    private let pollingPopup = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let pollingStatus = NSTextField(labelWithString: "")
+    private static let pollingRates = [125, 250, 500, 1000]
+    private var currentPollingRate: Int?
+    private let swipeReverse = NSButton(checkboxWithTitle: L10n.string("swipe.reverse"), target: nil, action: nil)
     private var displayedDeviceName: String?
     private var displayedDeviceConnected = false
     private var displayedBattery: String?
@@ -178,6 +192,14 @@ final class VisualConfigWindowController: NSWindowController, NSWindowDelegate {
     private let getMappings: () -> [Int: Action]
     private let setMapping: (Int, Action) -> Void
     private let startCalibration: (Int) -> Void
+    private let getDesktopSwipeButton: () -> Int?
+    private let setDesktopSwipeButton: (Int?) -> Void
+    private let getDesktopSwipeReversed: () -> Bool
+    private let setDesktopSwipeReversed: (Bool) -> Void
+    private let getDesktopSwipeDistance: () -> Double
+    private let setDesktopSwipeDistance: (Double) -> Void
+    private let readPollingRate: (@escaping (Result<Int, Error>) -> Void) -> Void
+    private let setPollingRate: (Int, @escaping (Result<Int, Error>) -> Void) -> Void
     private let readDPI: (@escaping (Result<Int, Error>) -> Void) -> Void
     private let setDPI: (Int, Bool, @escaping (Result<Int, Error>) -> Void) -> Void
 
@@ -185,12 +207,28 @@ final class VisualConfigWindowController: NSWindowController, NSWindowDelegate {
         getMappings: @escaping () -> [Int: Action],
         setMapping: @escaping (Int, Action) -> Void,
         startCalibration: @escaping (Int) -> Void,
+        getDesktopSwipeButton: @escaping () -> Int?,
+        setDesktopSwipeButton: @escaping (Int?) -> Void,
+        getDesktopSwipeReversed: @escaping () -> Bool,
+        setDesktopSwipeReversed: @escaping (Bool) -> Void,
+        getDesktopSwipeDistance: @escaping () -> Double,
+        setDesktopSwipeDistance: @escaping (Double) -> Void,
+        readPollingRate: @escaping (@escaping (Result<Int, Error>) -> Void) -> Void,
+        setPollingRate: @escaping (Int, @escaping (Result<Int, Error>) -> Void) -> Void,
         readDPI: @escaping (@escaping (Result<Int, Error>) -> Void) -> Void,
         setDPI: @escaping (Int, Bool, @escaping (Result<Int, Error>) -> Void) -> Void
     ) {
         self.getMappings = getMappings
         self.setMapping = setMapping
         self.startCalibration = startCalibration
+        self.getDesktopSwipeButton = getDesktopSwipeButton
+        self.setDesktopSwipeButton = setDesktopSwipeButton
+        self.getDesktopSwipeReversed = getDesktopSwipeReversed
+        self.setDesktopSwipeReversed = setDesktopSwipeReversed
+        self.getDesktopSwipeDistance = getDesktopSwipeDistance
+        self.setDesktopSwipeDistance = setDesktopSwipeDistance
+        self.readPollingRate = readPollingRate
+        self.setPollingRate = setPollingRate
         self.readDPI = readDPI
         self.setDPI = setDPI
 
@@ -200,8 +238,9 @@ final class VisualConfigWindowController: NSWindowController, NSWindowDelegate {
             backing: .buffered,
             defer: false
         )
-        window.title = "G502 Stage Mouse"
+        window.title = L10n.string("visual.window.title")
         window.minSize = NSSize(width: 960, height: 740)
+        window.collectionBehavior.insert(.fullScreenPrimary)
         window.isRestorable = false
         window.setFrameAutosaveName("G502StageMouse.VisualConfiguration")
         window.titlebarAppearsTransparent = true
@@ -254,7 +293,7 @@ final class VisualConfigWindowController: NSWindowController, NSWindowDelegate {
         let settingsButton = NSButton(frame: .zero)
         settingsButton.bezelStyle = .regularSquare
         settingsButton.isBordered = false
-        settingsButton.image = NSImage(systemSymbolName: "gearshape.fill", accessibilityDescription: "Paramètres")
+        settingsButton.image = NSImage(systemSymbolName: "gearshape.fill", accessibilityDescription: L10n.string("visual.settings"))
         settingsButton.contentTintColor = .secondaryLabelColor
         settingsButton.translatesAutoresizingMaskIntoConstraints = false
         settingsButton.target = self
@@ -282,11 +321,11 @@ final class VisualConfigWindowController: NSWindowController, NSWindowDelegate {
 
         // ── Sidebar content ──
 
-        let heading = NSTextField(labelWithString: "Boutons et gestes")
+        let heading = NSTextField(labelWithString: L10n.string("visual.heading"))
         heading.font = .systemFont(ofSize: 22, weight: .bold)
         heading.alignment = .center
 
-        let subheading = NSTextField(wrappingLabelWithString: "Appuyez sur un bouton pour le localiser.")
+        let subheading = NSTextField(wrappingLabelWithString: L10n.string("visual.instruction"))
         subheading.font = .systemFont(ofSize: 12)
         subheading.textColor = .secondaryLabelColor
         subheading.alignment = .center
@@ -323,9 +362,9 @@ final class VisualConfigWindowController: NSWindowController, NSWindowDelegate {
         let dpiCard = NSVisualEffectView()
         configureCard(dpiCard, radius: 10)
         dpiCard.translatesAutoresizingMaskIntoConstraints = false
-        dpiCard.heightAnchor.constraint(equalToConstant: 108).isActive = true
+        dpiCard.heightAnchor.constraint(equalToConstant: 144).isActive = true
 
-        let dpiTitle = NSTextField(labelWithString: "Sensibilité")
+        let dpiTitle = NSTextField(labelWithString: L10n.string("dpi.title"))
         dpiTitle.font = .systemFont(ofSize: 13, weight: .semibold)
         dpiStatus.font = .systemFont(ofSize: 11)
         dpiStatus.textColor = .secondaryLabelColor
@@ -367,7 +406,7 @@ final class VisualConfigWindowController: NSWindowController, NSWindowDelegate {
         dpiRange.alignment = .centerY
         dpiRange.spacing = 7
 
-        dpiPreset.addItem(withTitle: "Préréglage")
+        dpiPreset.addItem(withTitle: L10n.string("dpi.preset"))
         for value in [400, 800, 1_200, 1_600, 3_200, 6_400] {
             dpiPreset.addItem(withTitle: "\(value)")
             dpiPreset.lastItem?.representedObject = value
@@ -384,12 +423,17 @@ final class VisualConfigWindowController: NSWindowController, NSWindowDelegate {
         dpiApply.target = self
         dpiApply.action = #selector(applyDPI(_:))
 
-        let dpiActions = NSStackView(views: [dpiPreset, dpiPersist, NSView(), dpiApply])
-        dpiActions.orientation = .horizontal
-        dpiActions.alignment = .centerY
-        dpiActions.spacing = 4
+        let dpiActionButtons = NSStackView(views: [dpiPreset, NSView(), dpiApply])
+        dpiActionButtons.orientation = .horizontal
+        dpiActionButtons.alignment = .centerY
+        dpiActionButtons.spacing = 4
 
-        let dpiStack = NSStackView(views: [dpiHeader, dpiRange, dpiActions])
+        let dpiActions = NSStackView(views: [dpiActionButtons, dpiPersist])
+        dpiActions.orientation = .vertical
+        dpiActions.alignment = .width
+        dpiActions.spacing = 2
+
+        let dpiStack = NSStackView(views: [dpiHeader, dpiRange, dpiActions, dpiStatus])
         dpiStack.orientation = .vertical
         dpiStack.alignment = .width
         dpiStack.spacing = 6
@@ -419,9 +463,9 @@ final class VisualConfigWindowController: NSWindowController, NSWindowDelegate {
 
         // ── Button mapping rows (the main content) ──
 
-        let physicalNames = [
-            3: "G3 · Molette", 4: "G4 · Arrière", 5: "G5 · Avant",
-            6: "G6 · DPI", 7: "G7 · DPI −", 8: "G8 · DPI +", 9: "G9 · Profil"
+        let physicalNameKeys: [Int: String] = [
+            3: "visual.button.g3", 4: "visual.button.g4", 5: "visual.button.g5",
+            6: "visual.button.g6", 7: "visual.button.g7", 8: "visual.button.g8", 9: "visual.button.g9"
         ]
 
         for button in 3...9 {
@@ -437,7 +481,9 @@ final class VisualConfigWindowController: NSWindowController, NSWindowDelegate {
             }
             row.heightAnchor.constraint(equalToConstant: 32).isActive = true
 
-            let label = NSTextField(labelWithString: physicalNames[button] ?? "G\(button)")
+            let physicalName = physicalNameKeys[button].map { L10n.string($0) }
+                ?? L10n.format("visual.button.generic", button)
+            let label = NSTextField(labelWithString: physicalName)
             label.font = .systemFont(ofSize: 12, weight: .medium)
             label.widthAnchor.constraint(equalToConstant: 88).isActive = true
 
@@ -459,7 +505,7 @@ final class VisualConfigWindowController: NSWindowController, NSWindowDelegate {
             let associate = NSButton(frame: .zero)
             associate.bezelStyle = .regularSquare
             associate.isBordered = false
-            associate.image = NSImage(systemSymbolName: "link", accessibilityDescription: "Associer")
+            associate.image = NSImage(systemSymbolName: "link", accessibilityDescription: L10n.string("visual.associate"))
             associate.contentTintColor = .tertiaryLabelColor
             associate.target = self
             associate.action = #selector(calibrateButton(_:))
@@ -475,7 +521,85 @@ final class VisualConfigWindowController: NSWindowController, NSWindowDelegate {
         }
 
         stack.setCustomSpacing(14, after: stack.arrangedSubviews.last!)
+
+        let swipeTitle = NSTextField(labelWithString: L10n.string("swipe.title"))
+        swipeTitle.font = .systemFont(ofSize: 13, weight: .semibold)
+        swipePopup.controlSize = .small
+        swipePopup.addItem(withTitle: L10n.string("swipe.off"))
+        for button in 4...9 {
+            swipePopup.addItem(withTitle: L10n.string("visual.button.g\(button)"))
+            swipePopup.lastItem?.tag = button
+        }
+        swipePopup.itemArray.first?.tag = 0
+        swipePopup.selectItem(withTag: getDesktopSwipeButton() ?? 0)
+        swipePopup.target = self
+        swipePopup.action = #selector(swipeButtonChanged(_:))
+        let swipeHeader = NSStackView(views: [swipeTitle, NSView(), swipePopup])
+        swipeHeader.orientation = .horizontal
+        swipeHeader.alignment = .centerY
+        swipeHeader.spacing = 6
+        let swipeHelp = NSTextField(wrappingLabelWithString: L10n.string("swipe.help"))
+        swipeHelp.font = .systemFont(ofSize: 11)
+        swipeHelp.textColor = .secondaryLabelColor
+        swipeHelp.maximumNumberOfLines = 0
+        swipeDistanceSlider.controlSize = .small
+        swipeDistanceSlider.doubleValue = getDesktopSwipeDistance()
+        swipeDistanceSlider.target = self
+        swipeDistanceSlider.action = #selector(swipeDistanceChanged(_:))
+        swipeDistanceValue.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
+        swipeDistanceValue.textColor = .secondaryLabelColor
+        swipeDistanceValue.setContentHuggingPriority(.required, for: .horizontal)
+        let swipeDistanceLabel = NSTextField(labelWithString: L10n.string("swipe.distance"))
+        swipeDistanceLabel.font = .systemFont(ofSize: 11)
+        swipeDistanceLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
+        let swipeDistanceRow = NSStackView(views: [swipeDistanceLabel, swipeDistanceSlider, swipeDistanceValue])
+        swipeDistanceRow.orientation = .horizontal
+        swipeDistanceRow.alignment = .centerY
+        swipeDistanceRow.spacing = 8
+        updateSwipeDistanceLabel()
+        swipeReverse.controlSize = .small
+        swipeReverse.state = getDesktopSwipeReversed() ? .on : .off
+        swipeReverse.target = self
+        swipeReverse.action = #selector(swipeReverseChanged(_:))
+        let swipeStack = NSStackView(views: [swipeHeader, swipeHelp, swipeDistanceRow, swipeReverse])
+        swipeStack.orientation = .vertical
+        swipeStack.alignment = .width
+        swipeStack.spacing = 4
+        stack.addArrangedSubview(swipeStack)
+        swipeStack.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+        stack.setCustomSpacing(14, after: swipeStack)
+
+        let pollingTitle = NSTextField(labelWithString: L10n.string("polling.title"))
+        pollingTitle.font = .systemFont(ofSize: 13, weight: .semibold)
+        pollingPopup.controlSize = .small
+        for rate in Self.pollingRates {
+            pollingPopup.addItem(withTitle: L10n.format("polling.value", rate))
+            pollingPopup.lastItem?.tag = rate
+        }
+        pollingPopup.isEnabled = false
+        pollingPopup.target = self
+        pollingPopup.action = #selector(pollingRateChanged(_:))
+        pollingStatus.font = .systemFont(ofSize: 11)
+        pollingStatus.textColor = .secondaryLabelColor
+        pollingStatus.lineBreakMode = .byTruncatingTail
+        let pollingHeader = NSStackView(views: [pollingTitle, NSView(), pollingPopup])
+        pollingHeader.orientation = .horizontal
+        pollingHeader.alignment = .centerY
+        pollingHeader.spacing = 6
+        let pollingHelp = NSTextField(wrappingLabelWithString: L10n.string("polling.help"))
+        pollingHelp.font = .systemFont(ofSize: 11)
+        pollingHelp.textColor = .secondaryLabelColor
+        pollingHelp.maximumNumberOfLines = 0
+        let pollingStack = NSStackView(views: [pollingHeader, pollingHelp, pollingStatus])
+        pollingStack.orientation = .vertical
+        pollingStack.alignment = .width
+        pollingStack.spacing = 4
+        stack.addArrangedSubview(pollingStack)
+        pollingStack.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+        stack.setCustomSpacing(14, after: pollingStack)
+
         stack.addArrangedSubview(dpiCard)
+        dpiCard.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
 
         // ── Scroll view ──
 
@@ -500,7 +624,7 @@ final class VisualConfigWindowController: NSWindowController, NSWindowDelegate {
         let vc = NSViewController()
         let view = NSView(frame: NSRect(x: 0, y: 0, width: 250, height: 60))
 
-        let message = NSTextField(wrappingLabelWithString: "L’activation de fenêtre au survol reste désactivée. Le stabilisateur agit uniquement après un clic, hors saisie clavier. Le défilement libre à la molette se règle depuis le menu de l’app.")
+        let message = NSTextField(wrappingLabelWithString: L10n.string("visual.settings.message"))
         message.frame = NSRect(x: 16, y: 12, width: 218, height: 38)
         message.textColor = .secondaryLabelColor
         view.addSubview(message)
@@ -516,11 +640,11 @@ final class VisualConfigWindowController: NSWindowController, NSWindowDelegate {
               let action = Action(rawValue: raw) else { return }
         setMapping(sender.tag, action)
         diagram.mappings = getMappings()
-        setDetectionState("✓ G\(sender.tag) · \(action.title)", color: action == .none ? .secondaryLabelColor : .systemGreen, highlightedButton: sender.tag)
+        setDetectionState(L10n.format("visual.detection.action", sender.tag, action.title), color: action.blocksNativeInput ? .systemGreen : .secondaryLabelColor, highlightedButton: sender.tag)
     }
 
     @objc private func calibrateButton(_ sender: NSButton) {
-        setDetectionState("🔗 En attente de G\(sender.tag)…", color: .systemOrange)
+        setDetectionState(L10n.format("calibration.waiting", sender.tag), color: .systemOrange)
         startCalibration(sender.tag)
     }
 
@@ -531,42 +655,88 @@ final class VisualConfigWindowController: NSWindowController, NSWindowDelegate {
         dpiField.integerValue = normalized
     }
 
-    @objc private func dpiSliderChanged(_ sender: NSSlider) { updateDPIControls(Int(sender.doubleValue)); dpiStatus.stringValue = "Prêt" }
-    @objc private func dpiFieldChanged(_ sender: NSTextField) { updateDPIControls(sender.integerValue); dpiStatus.stringValue = "Prêt" }
+    @objc private func dpiSliderChanged(_ sender: NSSlider) { updateDPIControls(Int(sender.doubleValue)); dpiStatus.stringValue = L10n.string("dpi.ready") }
+    @objc private func dpiFieldChanged(_ sender: NSTextField) { updateDPIControls(sender.integerValue); dpiStatus.stringValue = L10n.string("dpi.ready") }
     @objc private func dpiPresetChanged(_ sender: NSPopUpButton) {
         guard let value = sender.selectedItem?.representedObject as? Int else { return }
-        updateDPIControls(value); dpiStatus.stringValue = "Prêt"
+        updateDPIControls(value); dpiStatus.stringValue = L10n.string("dpi.ready")
     }
 
     @objc private func applyDPI(_ sender: NSButton) {
         let value = normalizedDPI(dpiField.integerValue)
         updateDPIControls(value)
         dpiApply.isEnabled = false; dpiSlider.isEnabled = false
-        dpiStatus.stringValue = "Application…"; dpiStatus.textColor = .systemOrange
+        dpiStatus.stringValue = L10n.string("dpi.applying"); dpiStatus.textColor = .systemOrange
         setDPI(value, dpiPersist.state == .on) { [weak self] result in
             guard let self else { return }
             self.dpiApply.isEnabled = true; self.dpiSlider.isEnabled = true
             switch result {
             case .success(let applied):
-                self.updateDPIControls(applied); self.dpiStatus.stringValue = "\(applied) DPI ✓"; self.dpiStatus.textColor = .systemGreen
+                self.updateDPIControls(applied); self.dpiStatus.stringValue = L10n.format("dpi.applied", applied); self.dpiStatus.textColor = .systemGreen
             case .failure(let error):
-                self.dpiStatus.stringValue = "Échec"; self.dpiStatus.textColor = .systemRed
-                let alert = NSAlert(); alert.messageText = "Erreur DPI"; alert.informativeText = error.localizedDescription; alert.runModal()
+                self.dpiStatus.stringValue = L10n.string("dpi.failed"); self.dpiStatus.textColor = .systemRed
+                let alert = NSAlert(); alert.messageText = L10n.string("dpi.error.title"); alert.informativeText = error.localizedDescription; alert.runModal()
             }
         }
     }
 
+    private func refreshPollingRate() {
+        pollingPopup.isEnabled = false
+        pollingStatus.stringValue = L10n.string("polling.reading")
+        pollingStatus.textColor = .secondaryLabelColor
+        readPollingRate { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case .success(let rate):
+                self.showPollingRate(rate)
+                self.pollingStatus.stringValue = ""
+                self.pollingPopup.isEnabled = true
+            case .failure:
+                self.pollingStatus.stringValue = L10n.string("polling.unavailable")
+                self.pollingStatus.textColor = .systemRed
+            }
+        }
+    }
+
+    private func showPollingRate(_ rate: Int) {
+        currentPollingRate = rate
+        pollingPopup.selectItem(withTag: rate)
+    }
+
+    @objc private func pollingRateChanged(_ sender: NSPopUpButton) {
+        let rate = sender.selectedItem?.tag ?? 0
+        guard rate != 0 else { return }
+        sender.isEnabled = false
+        pollingStatus.stringValue = L10n.string("dpi.applying")
+        pollingStatus.textColor = .systemOrange
+        setPollingRate(rate) { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case .success(let applied):
+                self.showPollingRate(applied)
+                self.pollingStatus.stringValue = L10n.format("polling.applied", applied)
+                self.pollingStatus.textColor = .systemGreen
+            case .failure:
+                if let previous = self.currentPollingRate { self.showPollingRate(previous) }
+                self.pollingStatus.stringValue = L10n.string("polling.failed")
+                self.pollingStatus.textColor = .systemRed
+            }
+            self.pollingPopup.isEnabled = true
+        }
+    }
+
     private func refreshDPI() {
-        dpiApply.isEnabled = false; dpiStatus.stringValue = "Lecture…"
+        dpiApply.isEnabled = false; dpiStatus.stringValue = L10n.string("dpi.reading")
         readDPI { [weak self] result in
             guard let self else { return }
             self.dpiApply.isEnabled = true
             switch result {
             case .success(let dpi):
-                self.updateDPIControls(dpi); self.dpiStatus.stringValue = "\(dpi) DPI"; self.dpiStatus.textColor = .systemGreen
+                self.updateDPIControls(dpi); self.dpiStatus.stringValue = L10n.format("dpi.current", dpi); self.dpiStatus.textColor = .systemGreen
             case .failure:
-                self.dpiStatus.stringValue = "DPI indisponible"; self.dpiStatus.textColor = .systemRed
+                self.dpiStatus.stringValue = L10n.string("dpi.unavailable"); self.dpiStatus.textColor = .systemRed
             }
+            self.refreshPollingRate()
         }
     }
 
@@ -585,14 +755,14 @@ final class VisualConfigWindowController: NSWindowController, NSWindowDelegate {
     }
 
     func highlight(button: Int) {
-        let action = getMappings()[button] ?? .none
-        let desc = action == .none ? "aucune action" : action.title
-        setDetectionState("✓ G\(button) détecté · \(desc)", color: .systemGreen, highlightedButton: button)
+        let action = getMappings()[button] ?? .systemDefault
+        let desc = action.title
+        setDetectionState(L10n.format("visual.detection.detected", button, desc), color: .systemGreen, highlightedButton: button)
         popups[button]?.becomeFirstResponder()
     }
 
     func showCalibration(index: Int, button: Int) {
-        setDetectionState("🔗 G\(button) associé (index \(index))", color: .systemGreen, highlightedButton: button)
+        setDetectionState(L10n.format("calibration.assigned", button, index), color: .systemGreen, highlightedButton: button)
     }
 
     func updateDevice(name: String?, connected: Bool) {
@@ -602,11 +772,32 @@ final class VisualConfigWindowController: NSWindowController, NSWindowDelegate {
         refreshDeviceLabel()
     }
 
-    func updateBattery(text: String, charging: Bool, available: Bool) {
+    private func updateSwipeDistanceLabel() {
+        swipeDistanceValue.stringValue = L10n.format(
+            "swipe.distance.value",
+            Int(swipeDistanceSlider.doubleValue.rounded())
+        )
+    }
+
+    @objc private func swipeReverseChanged(_ sender: NSButton) {
+        setDesktopSwipeReversed(sender.state == .on)
+    }
+
+    @objc private func swipeDistanceChanged(_ sender: NSSlider) {
+        sender.doubleValue = (sender.doubleValue / 10).rounded() * 10
+        updateSwipeDistanceLabel()
+        setDesktopSwipeDistance(sender.doubleValue)
+    }
+
+    @objc private func swipeButtonChanged(_ sender: NSPopUpButton) {
+        let tag = sender.selectedItem?.tag ?? 0
+        setDesktopSwipeButton(tag == 0 ? nil : tag)
+    }
+
+    func updateBattery(text: String, charging: Bool, available: Bool, showsSymbol: Bool = true) {
         if available {
             let symbol = charging ? "⚡️" : "🔋"
-            let batteryText = text.replacingOccurrences(of: "Batterie : ", with: "")
-            displayedBattery = "\(symbol) \(batteryText)"
+            displayedBattery = showsSymbol ? "\(symbol) \(text)" : text
         } else {
             displayedBattery = nil
         }
@@ -615,12 +806,13 @@ final class VisualConfigWindowController: NSWindowController, NSWindowDelegate {
 
     private func refreshDeviceLabel() {
         guard displayedDeviceConnected else {
-            deviceLabel.stringValue = "🔴 Récepteur non détecté"
+            deviceLabel.stringValue = L10n.string("device.receiverMissing")
             deviceLabel.textColor = .systemRed
             return
         }
-        let base = "🟢 \(displayedDeviceName ?? "POWERPLAY") connecté"
-        deviceLabel.stringValue = displayedBattery.map { "\(base) · \($0)" } ?? base
+        let name = displayedDeviceName ?? L10n.string("device.powerplay")
+        deviceLabel.stringValue = displayedBattery.map { L10n.format("device.connectedWithBattery", name, $0) }
+            ?? L10n.format("device.connected", name)
         deviceLabel.textColor = .labelColor
     }
 }
